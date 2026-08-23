@@ -263,7 +263,13 @@ if (!process.env.TOKEN) {
     console.error('❌ ไม่พบ TOKEN ใน Environment Variables!');
 } else {
     console.log('⏳ Connecting to Discord Gateway...');
-    client.login(process.env.TOKEN).catch(err => {
+    const token = process.env.TOKEN.trim();
+    const loginTimeout = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Discord Gateway login timed out after 30 seconds')), 30_000);
+    });
+
+    Promise.race([client.login(token), loginTimeout]).catch(err => {
         console.error('❌ Login Failed Error Details:', err);
+        process.exitCode = 1;
     });
 }
