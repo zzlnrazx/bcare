@@ -284,6 +284,10 @@ client.on(Events.MessageCreate, async message => {
 process.on('unhandledRejection', reason => console.error('Unhandled Rejection:', reason));
 process.on('uncaughtException', err => console.error('Uncaught Exception:', err));
 
+console.log('--- CHECKING ENV ---');
+console.log('NODE_ENV:', process.env.NODE_ENV);
+console.log('TOKEN Exists:', !!process.env.TOKEN);
+
 if (!process.env.TOKEN) {
     console.error('❌ ไม่พบ TOKEN ใน Environment Variables!');
 } else {
