@@ -19,17 +19,21 @@ import {
 } from '@discordjs/voice';
 import googleTTS from 'google-tts-api';
 
-// 1. ดึง .env เฉพาะเมื่อรันบนเครื่องตัวเอง (Local)
+// 1. ดึง .env เฉพาะเมื่อรันบนเครื่องตัวเอง
 if (process.env.NODE_ENV !== 'production') {
     dotenv.config();
 }
 
-// 2. ตั้งค่า Express Server สำหรับ Render Port Binding
+// 2. เปิด Express Web Server ทันที ป้องกัน Render บ่นเรื่อง No open ports
 const app = express();
 const PORT = process.env.PORT || 10000;
 
 app.get('/', (req, res) => {
     res.send('Bot is running online 24/7!');
+});
+
+app.listen(PORT, () => {
+    console.log(`🌐 Web server successfully bound to port ${PORT}`);
 });
 
 // 3. ตั้งค่า Discord Client
@@ -100,12 +104,10 @@ client.on(Events.InteractionCreate, async interaction => {
     const { commandName, guild, member } = interaction;
     const player = getOrCreatePlayer(guild.id);
 
-    // --- /ping ---
     if (commandName === 'ping') {
         return await interaction.reply({ content: 'Pong!', ephemeral: true });
     }
 
-    // --- /join ---
     if (commandName === 'join') {
         await interaction.deferReply({ ephemeral: false });
 
@@ -152,7 +154,6 @@ client.on(Events.InteractionCreate, async interaction => {
         }
     } 
     
-    // --- /leave ---
     else if (commandName === 'leave') {
         await interaction.deferReply({ ephemeral: false });
 
@@ -170,7 +171,6 @@ client.on(Events.InteractionCreate, async interaction => {
         }
     }
 
-    // --- อ่านข้อความนี้ (Context Menu) ---
     else if (commandName === 'อ่านข้อความนี้') {
         await interaction.deferReply({ ephemeral: false });
 
@@ -283,14 +283,7 @@ if (!process.env.TOKEN) {
     console.error('❌ ไม่พบ TOKEN ใน Environment Variables!');
 } else {
     console.log('⏳ Connecting to Discord Gateway...');
-    
-    client.login(process.env.TOKEN)
-        .then(() => {
-            app.listen(PORT, () => {
-                console.log(`Web server running on port ${PORT}`);
-            });
-        })
-        .catch(err => {
-            console.error('❌ Login Failed Error Details:', err);
-        });
+    client.login(process.env.TOKEN).catch(err => {
+        console.error('❌ Login Failed Error Details:', err);
+    });
 }
