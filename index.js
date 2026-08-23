@@ -284,6 +284,14 @@ client.on(Events.MessageCreate, async message => {
 process.on('unhandledRejection', reason => console.error('Unhandled Rejection:', reason));
 process.on('uncaughtException', err => console.error('Uncaught Exception:', err));
 
+// ดักจับ Error และ Debug ล็อกการเชื่อมต่อ
+client.on('debug', info => {
+    if (info.includes('Connecting') || info.includes('Ready') || info.includes('Session')) {
+        console.log(`[DEBUG] ${info}`);
+    }
+});
+client.on('error', error => console.error('[CLIENT ERROR]', error));
+
 console.log('--- CHECKING ENV ---');
 console.log('NODE_ENV:', process.env.NODE_ENV);
 console.log('TOKEN Exists:', !!process.env.TOKEN);
@@ -291,5 +299,8 @@ console.log('TOKEN Exists:', !!process.env.TOKEN);
 if (!process.env.TOKEN) {
     console.error('❌ ไม่พบ TOKEN ใน Environment Variables!');
 } else {
-    client.login(process.env.TOKEN);
+    console.log('⏳ Connecting to Discord Gateway...');
+    client.login(process.env.TOKEN).catch(err => {
+        console.error('❌ Login Failed:', err);
+    });
 }
