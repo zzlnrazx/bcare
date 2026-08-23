@@ -69,7 +69,7 @@ client.on(Events.ShardError, error => {
 });
 
 client.on(Events.Debug, message => {
-    console.log('Discord debug:', message);
+    console.log('Discord debug:', message.replace(/(Provided token: ).+?(?=$|\n)/, '$1[redacted]'));
 });
 
 client.on(Events.Warn, message => {
@@ -272,12 +272,31 @@ if (!process.env.TOKEN) {
 } else {
     console.log('⏳ Connecting to Discord Gateway...');
     const token = process.env.TOKEN.trim();
-    const loginTimeout = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error('Discord Gateway login timed out after 30 seconds')), 30_000);
-    });
 
-    Promise.race([client.login(token), loginTimeout]).catch(err => {
-        console.error('❌ Login Failed Error Details:', err);
-        process.exitCode = 1;
-    });
+    const login = async () => {
+        try {
+            const gatewayResponse = await fetch('https://discord.com/api/v10/gateway/bot', {
+                headers: { Authorization: `Bot ${token}` },
+            });
+
+            if (!gatewayResponse.ok) {
+                console.error(`❌ Discord API rejected the token (HTTP ${gatewayResponse.status}).`);
+                process.exitCode = 1;
+                return;
+            }
+
+            console.log('✅ Discord API accepted the token. Starting Gateway connection...');
+            await Promise.race([
+                client.login(token),
+                new Promise((_, reject) => {
+                    setTimeout(() => reject(new Error('Discord Gateway login timed out after 30 seconds')), 30_000);
+                }),
+            ]);
+        } catch (error) {
+            console.error('❌ Login Failed Error Details:', error);
+            process.exitCode = 1;
+        }
+    };
+
+    login();
 }
