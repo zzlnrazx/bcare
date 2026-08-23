@@ -19,27 +19,20 @@ import {
 } from '@discordjs/voice';
 import googleTTS from 'google-tts-api';
 
+// 1. ดึง .env เฉพาะเมื่อรันบนเครื่องตัวเอง (Local)
 if (process.env.NODE_ENV !== 'production') {
     dotenv.config();
 }
 
-// -------------------------------------------------------------
-// 1. Express Web Server (สำหรับ Render 24/7)
-// -------------------------------------------------------------
+// 2. ตั้งค่า Express Server สำหรับ Render Port Binding
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
 app.get('/', (req, res) => {
     res.send('Bot is running online 24/7!');
 });
 
-app.listen(PORT, () => {
-    console.log(`Web server running on port ${PORT}`);
-});
-
-// -------------------------------------------------------------
-// 2. Discord Client & Voice Config
-// -------------------------------------------------------------
+// 3. ตั้งค่า Discord Client
 const client = new Client({ 
     intents: [
         GatewayIntentBits.Guilds,
@@ -66,9 +59,7 @@ const WARNING_COOLDOWN_MS = 10000;
 const SPAM_MAP = new Map();
 const COOLDOWN_MAP = new Map(); 
 
-// -------------------------------------------------------------
-// 3. โครงสร้าง Commands
-// -------------------------------------------------------------
+// 4. โครงสร้างคำสั่ง Slash Commands & Context Menu
 const commands = [
     new SlashCommandBuilder()
         .setName('ping')
@@ -85,11 +76,9 @@ const commands = [
     }
 ].map(command => typeof command.toJSON === 'function' ? command.toJSON() : command);
 
-// -------------------------------------------------------------
-// 4. Auto Register Commands เมื่อบอทออนไลน์บน Render
-// -------------------------------------------------------------
+// 5. Ready Event & Auto Register Commands
 client.on(Events.ClientReady, async readyClient => {
-    console.log(`Logged in as ${readyClient.user.tag}!`);
+    console.log(`🎉 SUCCESS! Logged in as ${readyClient.user.tag}!`);
 
     const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
     try {
@@ -104,19 +93,19 @@ client.on(Events.ClientReady, async readyClient => {
     }
 });
 
-// -------------------------------------------------------------
-// 5. Interaction Handler (แก้ปัญหาแอปไม่ตอบสนองด้วย deferReply)
-// -------------------------------------------------------------
+// 6. Handling Interactions
 client.on(Events.InteractionCreate, async interaction => {
     if (!interaction.isChatInputCommand() && !interaction.isMessageContextMenuCommand()) return;
 
     const { commandName, guild, member } = interaction;
     const player = getOrCreatePlayer(guild.id);
 
+    // --- /ping ---
     if (commandName === 'ping') {
         return await interaction.reply({ content: 'Pong!', ephemeral: true });
     }
 
+    // --- /join ---
     if (commandName === 'join') {
         await interaction.deferReply({ ephemeral: false });
 
@@ -163,6 +152,7 @@ client.on(Events.InteractionCreate, async interaction => {
         }
     } 
     
+    // --- /leave ---
     else if (commandName === 'leave') {
         await interaction.deferReply({ ephemeral: false });
 
@@ -180,6 +170,7 @@ client.on(Events.InteractionCreate, async interaction => {
         }
     }
 
+    // --- อ่านข้อความนี้ (Context Menu) ---
     else if (commandName === 'อ่านข้อความนี้') {
         await interaction.deferReply({ ephemeral: false });
 
@@ -216,9 +207,7 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 });
 
-// -------------------------------------------------------------
-// 6. Voice Events & Message Reader
-// -------------------------------------------------------------
+// 7. Voice Disconnect Event
 client.on(Events.VoiceStateUpdate, (oldState, newState) => {
     if (oldState.member.id === client.user.id) {
         if (oldState.channelId && !newState.channelId) {
@@ -234,6 +223,7 @@ client.on(Events.VoiceStateUpdate, (oldState, newState) => {
     }
 });
 
+// 8. Auto Read Chat Messages + Anti-Spam
 client.on(Events.MessageCreate, async message => {
     if (message.author.bot || !message.guild) return;
 
@@ -284,14 +274,7 @@ client.on(Events.MessageCreate, async message => {
 process.on('unhandledRejection', reason => console.error('Unhandled Rejection:', reason));
 process.on('uncaughtException', err => console.error('Uncaught Exception:', err));
 
-// ดักจับ Error และ Debug ล็อกการเชื่อมต่อ
-client.on('debug', info => {
-    if (info.includes('Connecting') || info.includes('Ready') || info.includes('Session')) {
-        console.log(`[DEBUG] ${info}`);
-    }
-});
-client.on('error', error => console.error('[CLIENT ERROR]', error));
-
+// 9. Login Execution Guard
 console.log('--- CHECKING ENV ---');
 console.log('NODE_ENV:', process.env.NODE_ENV);
 console.log('TOKEN Exists:', !!process.env.TOKEN);
@@ -300,7 +283,14 @@ if (!process.env.TOKEN) {
     console.error('❌ ไม่พบ TOKEN ใน Environment Variables!');
 } else {
     console.log('⏳ Connecting to Discord Gateway...');
-    client.login(process.env.TOKEN).catch(err => {
-        console.error('❌ Login Failed:', err);
-    });
+    
+    client.login(process.env.TOKEN)
+        .then(() => {
+            app.listen(PORT, () => {
+                console.log(`Web server running on port ${PORT}`);
+            });
+        })
+        .catch(err => {
+            console.error('❌ Login Failed Error Details:', err);
+        });
 }
