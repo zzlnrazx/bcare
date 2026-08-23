@@ -68,6 +68,14 @@ client.on(Events.ShardError, error => {
     console.error('❌ Discord gateway error:', error);
 });
 
+client.on(Events.Debug, message => {
+    console.log('Discord debug:', message);
+});
+
+client.on(Events.Warn, message => {
+    console.warn('Discord warning:', message);
+});
+
 // -------------------------------------------------------------
 // 3. Interaction Handlers
 // -------------------------------------------------------------
