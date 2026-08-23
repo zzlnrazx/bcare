@@ -1,6 +1,14 @@
 import dotenv from 'dotenv';
 import express from 'express';
-import { Client, Events, GatewayIntentBits } from 'discord.js';
+import { 
+    Client, 
+    Events, 
+    GatewayIntentBits, 
+    REST, 
+    Routes, 
+    SlashCommandBuilder,
+    ApplicationCommandType 
+} from 'discord.js';
 import { 
     joinVoiceChannel, 
     getVoiceConnection, 
@@ -16,7 +24,7 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 // -------------------------------------------------------------
-// Express Web Server (สำหรับ Render 24/7)
+// 1. Express Web Server (สำหรับ Render 24/7)
 // -------------------------------------------------------------
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -30,7 +38,7 @@ app.listen(PORT, () => {
 });
 
 // -------------------------------------------------------------
-// Discord Client Configuration
+// 2. Discord Client & Voice Config
 // -------------------------------------------------------------
 const client = new Client({ 
     intents: [
@@ -50,7 +58,7 @@ function getOrCreatePlayer(guildId) {
     return guildPlayers.get(guildId);
 }
 
-// Anti-Spam
+// Anti-Spam Config
 const MAX_MESSAGES = 5; 
 const PER_TIME_MS = 5000; 
 const WARNING_COOLDOWN_MS = 10000; 
@@ -58,12 +66,46 @@ const WARNING_COOLDOWN_MS = 10000;
 const SPAM_MAP = new Map();
 const COOLDOWN_MAP = new Map(); 
 
-client.on(Events.ClientReady, readyClient => {
+// -------------------------------------------------------------
+// 3. โครงสร้าง Commands
+// -------------------------------------------------------------
+const commands = [
+    new SlashCommandBuilder()
+        .setName('ping')
+        .setDescription('Replies with Pong!'),
+    new SlashCommandBuilder()
+        .setName('join')
+        .setDescription('ให้บอทเข้าห้องเสียงเพื่อเตรียมอ่านแชต'),
+    new SlashCommandBuilder()
+        .setName('leave')
+        .setDescription('สั่งให้บอทออกจากห้องเสียง'),
+    {
+        name: 'อ่านข้อความนี้',
+        type: ApplicationCommandType.Message
+    }
+].map(command => typeof command.toJSON === 'function' ? command.toJSON() : command);
+
+// -------------------------------------------------------------
+// 4. Auto Register Commands เมื่อบอทออนไลน์บน Render
+// -------------------------------------------------------------
+client.on(Events.ClientReady, async readyClient => {
     console.log(`Logged in as ${readyClient.user.tag}!`);
+
+    const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+    try {
+        console.log('⏳ กำลังอัปเดต Commands ไปยัง Discord...');
+        await rest.put(
+            Routes.applicationCommands(process.env.CLIENTID || readyClient.user.id),
+            { body: commands }
+        );
+        console.log('✅ อัปเดต Commands บน Discord สำเร็จ!');
+    } catch (error) {
+        console.error('❌ เกิดข้อผิดพลาดในการลงทะเบียน Commands:', error);
+    }
 });
 
 // -------------------------------------------------------------
-// Interaction Handlers (แก้ปัญหาแอปพลิเคชันไม่ตอบสนองด้วย deferReply)
+// 5. Interaction Handler (แก้ปัญหาแอปไม่ตอบสนองด้วย deferReply)
 // -------------------------------------------------------------
 client.on(Events.InteractionCreate, async interaction => {
     if (!interaction.isChatInputCommand() && !interaction.isMessageContextMenuCommand()) return;
@@ -71,14 +113,12 @@ client.on(Events.InteractionCreate, async interaction => {
     const { commandName, guild, member } = interaction;
     const player = getOrCreatePlayer(guild.id);
 
-    // --- คำสั่ง /ping ---
     if (commandName === 'ping') {
         return await interaction.reply({ content: 'Pong!', ephemeral: true });
     }
 
-    // --- คำสั่ง /join ---
     if (commandName === 'join') {
-        await interaction.deferReply({ ephemeral: false }); // ส่งสัญญาณบอก Discord ป้องกันการค้าง 3s
+        await interaction.deferReply({ ephemeral: false });
 
         const voiceChannel = member?.voice?.channel;
         if (!voiceChannel) {
@@ -123,7 +163,6 @@ client.on(Events.InteractionCreate, async interaction => {
         }
     } 
     
-    // --- คำสั่ง /leave ---
     else if (commandName === 'leave') {
         await interaction.deferReply({ ephemeral: false });
 
@@ -141,7 +180,6 @@ client.on(Events.InteractionCreate, async interaction => {
         }
     }
 
-    // --- คำสั่งกดปัดขวา "อ่านข้อความนี้" ---
     else if (commandName === 'อ่านข้อความนี้') {
         await interaction.deferReply({ ephemeral: false });
 
@@ -179,7 +217,7 @@ client.on(Events.InteractionCreate, async interaction => {
 });
 
 // -------------------------------------------------------------
-// Voice Disconnect Event & Message Reader
+// 6. Voice Events & Message Reader
 // -------------------------------------------------------------
 client.on(Events.VoiceStateUpdate, (oldState, newState) => {
     if (oldState.member.id === client.user.id) {
