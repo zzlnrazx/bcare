@@ -1,274 +1,188 @@
-import dotenv from 'dotenv';
+import 'dotenv/config';
+import dns from 'node:dns';
 import express from 'express';
 import { Client, Events, GatewayIntentBits } from 'discord.js';
-import { 
-    joinVoiceChannel, 
-    getVoiceConnection, 
-    createAudioPlayer, 
-    createAudioResource,
+import {
+    NoSubscriberBehavior,
     VoiceConnectionStatus,
-    entersState
+    createAudioPlayer,
+    createAudioResource,
+    entersState,
+    getVoiceConnection,
+    joinVoiceChannel,
 } from '@discordjs/voice';
 import googleTTS from 'google-tts-api';
 
-dotenv.config();
+dns.setDefaultResultOrder('ipv4first');
 
-// -------------------------------------------------------------
-// 1. Express Web Server (จับ Port ทันที ป้องกัน Render Error)
-// -------------------------------------------------------------
+const token = process.env.TOKEN?.trim();
+const port = Number(process.env.PORT) || 10000;
+const maxTextLength = 200;
+const maxMessages = 5;
+const spamWindowMs = 5_000;
+const warningCooldownMs = 10_000;
+
+if (!token) {
+    console.error('TOKEN is missing. Add TOKEN to the service environment.');
+    process.exit(1);
+}
+
 const app = express();
-const PORT = process.env.PORT || 10000;
+app.get('/', (_request, response) => response.send('Discord bot is running.'));
+app.get('/health', (_request, response) => response.json({ status: 'ok' }));
+app.listen(port, '0.0.0.0', () => console.log(`Web server listening on port ${port}`));
 
-app.get('/', (req, res) => {
-    res.send('Bot is running online 24/7!');
-});
-
-app.listen(PORT, () => {
-    console.log(`🌐 Web server successfully bound to port ${PORT}`);
-});
-
-// -------------------------------------------------------------
-// 2. Discord Client Configuration
-// -------------------------------------------------------------
-const client = new Client({ 
+const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildVoiceStates
-    ] 
+        GatewayIntentBits.GuildVoiceStates,
+    ],
 });
 
 const guildPlayers = new Map();
+const messageTimestamps = new Map();
+const warningCooldowns = new Map();
 
-function getOrCreatePlayer(guildId) {
-    if (!guildPlayers.has(guildId)) {
-        guildPlayers.set(guildId, createAudioPlayer());
+function getPlayer(guildId) {
+    let player = guildPlayers.get(guildId);
+    if (!player) {
+        player = createAudioPlayer({ behavior: NoSubscriberBehavior.Stop });
+        player.on('error', error => console.error(`Audio error in guild ${guildId}:`, error.message));
+        guildPlayers.set(guildId, player);
     }
-    return guildPlayers.get(guildId);
+    return player;
 }
 
-// Anti-Spam
-const MAX_MESSAGES = 5; 
-const PER_TIME_MS = 5000; 
-const WARNING_COOLDOWN_MS = 10000; 
+function getSpeechUrl(text) {
+    return googleTTS.getAudioUrl(text.slice(0, maxTextLength), {
+        lang: 'th',
+        slow: false,
+        host: 'https://translate.google.com',
+    });
+}
 
-const SPAM_MAP = new Map();
-const COOLDOWN_MAP = new Map(); 
+async function speak(guildId, text) {
+    const connection = getVoiceConnection(guildId);
+    if (!connection || connection.state.status === VoiceConnectionStatus.Destroyed) return false;
+    getPlayer(guildId).play(createAudioResource(getSpeechUrl(text)));
+    return true;
+}
 
-client.on(Events.ClientReady, readyClient => {
-    console.log(`🎉 Logged in as ${readyClient.user.tag}!`);
+client.once(Events.ClientReady, readyClient => {
+    clearTimeout(gatewayTimeout);
+    console.log(`Logged in as ${readyClient.user.tag}`);
 });
 
-client.on(Events.Error, error => {
-    console.error('❌ Discord client error:', error);
-});
+client.on(Events.Error, error => console.error('Discord client error:', error));
+client.on(Events.ShardError, error => console.error('Discord gateway error:', error));
 
-client.on(Events.ShardError, error => {
-    console.error('❌ Discord gateway error:', error);
-});
+if (process.env.DEBUG === 'true') {
+    client.on(Events.Debug, message => {
+        console.log('Discord debug:', message.replace(/Provided token: .*?(?=$|\n)/, 'Provided token: [redacted]'));
+    });
+}
 
-client.on(Events.Debug, message => {
-    console.log('Discord debug:', message.replace(/(Provided token: ).+?(?=$|\n)/, '$1[redacted]'));
-});
-
-client.on(Events.Warn, message => {
-    console.warn('Discord warning:', message);
-});
-
-// -------------------------------------------------------------
-// 3. Interaction Handlers
-// -------------------------------------------------------------
 client.on(Events.InteractionCreate, async interaction => {
-    if (!interaction.isChatInputCommand() && !interaction.isMessageContextMenuCommand()) return;
+    if (!interaction.guildId) return;
 
-    const { commandName, guild, member } = interaction;
-    const player = getOrCreatePlayer(guild.id);
-
-    // --- /ping ---
-    if (commandName === 'ping') {
-        return await interaction.reply({ content: 'Pong!', ephemeral: true });
-    }
-
-    // --- /join ---
-    if (commandName === 'join') {
-        await interaction.deferReply({ ephemeral: false });
-
-        const voiceChannel = member?.voice?.channel;
-        if (!voiceChannel) {
-            return await interaction.editReply({ content: '❌ คุณต้องอยู่ในห้องเสียงก่อนสั่งให้บอทเข้า!' });
-        }
-
-        let connection = getVoiceConnection(guild.id);
-
-        if (connection && 
-            connection.joinConfig.channelId === voiceChannel.id && 
-            connection.state.status !== VoiceConnectionStatus.Destroyed) {
-            return await interaction.editReply({ content: 'ฉันอยู่ในห้องเสียงนี้อยู่แล้วครับ!' });
-        }
-
-        try {
-            if (connection) {
-                connection.destroy();
+    try {
+        if (interaction.isChatInputCommand()) {
+            if (interaction.commandName === 'ping') {
+                await interaction.reply({ content: 'Pong!', ephemeral: true });
+                return;
             }
 
-            connection = joinVoiceChannel({
-                channelId: voiceChannel.id,
-                guildId: guild.id,
-                adapterCreator: guild.voiceAdapterCreator,
-            });
-
-            connection.on(VoiceConnectionStatus.Disconnected, async () => {
-                try {
-                    await Promise.race([
-                        entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
-                        entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
-                    ]);
-                } catch (error) {
-                    try { connection.destroy(); } catch (e) {}
+            if (interaction.commandName === 'join') {
+                const voiceChannel = interaction.member?.voice?.channel;
+                if (!voiceChannel) {
+                    await interaction.reply('คุณต้องอยู่ในห้องเสียงก่อน');
+                    return;
                 }
-            });
 
-            connection.subscribe(player);
-            await interaction.editReply({ content: `🔊 บอทเข้าห้อง **${voiceChannel.name}** เรียบร้อยแล้ว!` });
-        } catch (err) {
-            console.error('Voice join failed:', err);
-            await interaction.editReply({ content: 'ไม่สามารถเข้าร่วมช่องเสียงได้' });
-        }
-    } 
-    
-    // --- /leave ---
-    else if (commandName === 'leave') {
-        await interaction.deferReply({ ephemeral: false });
-
-        try {
-            const connection = getVoiceConnection(guild.id);
-            if (connection && connection.state.status !== VoiceConnectionStatus.Destroyed) {
-                connection.destroy();
-                await interaction.editReply({ content: '👋 บอทออกจากห้องเสียงเรียบร้อยแล้ว!' });
-            } else {
-                await interaction.editReply({ content: '❌ บอทไม่ได้อยู่ในห้องเสียง' });
+                await interaction.deferReply();
+                getVoiceConnection(interaction.guildId)?.destroy();
+                const connection = joinVoiceChannel({
+                    channelId: voiceChannel.id,
+                    guildId: interaction.guildId,
+                    adapterCreator: interaction.guild.voiceAdapterCreator,
+                });
+                connection.subscribe(getPlayer(interaction.guildId));
+                await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
+                await interaction.editReply(`บอทเข้าห้อง ${voiceChannel.name} แล้ว`);
+                return;
             }
-        } catch (err) {
-            console.error('Voice leave failed:', err);
-            await interaction.editReply({ content: 'เกิดข้อผิดพลาดตอนพยายามออกจากช่องเสียง' });
-        }
-    }
 
-    // --- อ่านข้อความนี้ ---
-    else if (commandName === 'อ่านข้อความนี้') {
-        await interaction.deferReply({ ephemeral: false });
-
-        const connection = getVoiceConnection(guild.id);
-        
-        if (!connection || connection.state.status === VoiceConnectionStatus.Destroyed) {
-            return interaction.editReply({ 
-                content: '❌ บอทยังไม่ได้อยู่ในห้องเสียง! โปรดใช้คำสั่ง `/join` ก่อนนะ'
-            });
+            if (interaction.commandName === 'leave') {
+                getVoiceConnection(interaction.guildId)?.destroy();
+                await interaction.reply('บอทออกจากห้องเสียงแล้ว');
+                return;
+            }
         }
 
-        const textToSpeak = interaction.targetMessage.content;
-        if (!textToSpeak || textToSpeak.trim().length === 0) {
-            return interaction.editReply({ content: '❌ ข้อความนี้ไม่มีตัวหนังสือให้อ่าน (อาจเป็นรูปภาพหรือไฟล์)' });
+        if (interaction.isMessageContextMenuCommand() && interaction.commandName === 'อ่านข้อความนี้') {
+            await interaction.deferReply();
+            const text = interaction.targetMessage?.content?.trim();
+            if (!text) {
+                await interaction.editReply('ข้อความนี้ไม่มีตัวหนังสือให้อ่าน');
+            } else if (await speak(interaction.guildId, text)) {
+                const preview = text.length > 50 ? `${text.slice(0, 50)}...` : text;
+                await interaction.editReply(`กำลังอ่าน: "${preview}"`);
+            } else {
+                await interaction.editReply('บอทยังไม่ได้อยู่ในห้องเสียง โปรดใช้ /join ก่อน');
+            }
         }
-
-        try {
-            const url = googleTTS.getAudioUrl(textToSpeak.slice(0, 200), {
-                lang: 'th',
-                slow: false,
-                host: 'https://translate.google.com',
-            });
-
-            const resource = createAudioResource(url);
-            player.play(resource);
-
-            return interaction.editReply({ 
-                content: `🗣️ กำลังอ่าน: "${textToSpeak.length > 50 ? textToSpeak.slice(0, 50) + '...' : textToSpeak}"`
-            });
-        } catch (error) {
-            console.error('TTS Context Menu Error:', error);
-            return interaction.editReply({ content: '❌ เกิดข้อผิดพลาดในการแปลงเสียง' });
-        }
+    } catch (error) {
+        console.error('Interaction error:', error);
+        const reply = 'เกิดข้อผิดพลาดในการทำงาน';
+        if (interaction.deferred || interaction.replied) await interaction.editReply(reply).catch(() => {});
+        else await interaction.reply({ content: reply, ephemeral: true }).catch(() => {});
     }
 });
 
-// -------------------------------------------------------------
-// 4. Voice Disconnect Event & Auto Read
-// -------------------------------------------------------------
 client.on(Events.VoiceStateUpdate, (oldState, newState) => {
-    if (oldState.member.id === client.user.id) {
-        if (oldState.channelId && !newState.channelId) {
-            const connection = getVoiceConnection(oldState.guild.id);
-            if (connection) {
-                try {
-                    connection.destroy();
-                } catch (e) {
-                    console.error('Error destroying voice connection on kick:', e);
-                }
-            }
-        }
+    if (oldState.id === client.user?.id && oldState.channelId && !newState.channelId) {
+        getVoiceConnection(oldState.guild.id)?.destroy();
     }
 });
 
 client.on(Events.MessageCreate, async message => {
-    if (message.author.bot || !message.guild) return;
+    if (message.author.bot || !message.guild || !message.content.trim()) return;
 
-    const userId = message.author.id;
     const now = Date.now();
-    
-    if (COOLDOWN_MAP.has(userId)) return; 
-    
-    const userMessages = SPAM_MAP.get(userId) || [];
-    const recentMessages = userMessages.filter(timestamp => now - timestamp < PER_TIME_MS);
-    recentMessages.push(now);
-    SPAM_MAP.set(userId, recentMessages);
+    if (warningCooldowns.has(message.author.id)) return;
+    const recent = (messageTimestamps.get(message.author.id) ?? [])
+        .filter(timestamp => now - timestamp < spamWindowMs);
+    recent.push(now);
+    messageTimestamps.set(message.author.id, recent);
 
-    if (recentMessages.length > MAX_MESSAGES) {
-        await message.reply(`🚨 **${message.author.username}**, โปรดส่งข้อความช้าลง!`);
-        SPAM_MAP.delete(userId); 
-        COOLDOWN_MAP.set(userId, now); 
-        setTimeout(() => COOLDOWN_MAP.delete(userId), WARNING_COOLDOWN_MS);
+    if (recent.length > maxMessages) {
+        await message.reply(`โปรดส่งข้อความช้าลง ${message.author}`);
+        messageTimestamps.delete(message.author.id);
+        warningCooldowns.set(message.author.id, true);
+        setTimeout(() => warningCooldowns.delete(message.author.id), warningCooldownMs);
         return;
     }
 
-    const content = message.content;
-    const connection = getVoiceConnection(message.guild.id);
-
-    if (
-        connection && 
-        connection.state.status !== VoiceConnectionStatus.Destroyed && 
-        !content.startsWith('http') && 
-        message.attachments.size === 0
-    ) {
-        try {
-            const player = getOrCreatePlayer(message.guild.id);
-            const textToSpeak = content.substring(0, 200);
-            const url = googleTTS.getAudioUrl(textToSpeak, {
-                lang: 'th',
-                slow: false,
-                host: 'https://translate.google.com',
-            });
-
-            const resource = createAudioResource(url);
-            player.play(resource);
-        } catch (error) {
-            console.error('TTS Error:', error);
-        }
+    if (message.attachments.size === 0 && !/^https?:\/\//i.test(message.content)) {
+        await speak(message.guild.id, message.content).catch(error => {
+            console.error('Message TTS error:', error.message);
+        });
     }
 });
 
-process.on('unhandledRejection', reason => console.error('Unhandled Rejection:', reason));
-process.on('uncaughtException', err => console.error('Uncaught Exception:', err));
+process.on('unhandledRejection', error => console.error('Unhandled rejection:', error));
+process.on('uncaughtException', error => console.error('Uncaught exception:', error));
 
-// -------------------------------------------------------------
-// 5. Login
-// -------------------------------------------------------------
-if (!process.env.TOKEN?.trim()) {
-    console.error('❌ ไม่พบ TOKEN ใน Environment Variables!');
-} else {
-    console.log('⏳ Connecting to Discord Gateway...');
-    client.login(process.env.TOKEN.trim()).catch(error => {
-        console.error('❌ Login Failed Error Details:', error);
-        process.exitCode = 1;
-    });
-}
+const gatewayTimeout = setTimeout(() => {
+    console.error('Discord Gateway connection timed out after 30 seconds.');
+    console.error('The service can reach its HTTP port, but Discord Gateway did not respond.');
+    client.destroy();
+    process.exit(1);
+}, 30_000);
+
+client.login(token).catch(error => {
+    console.error('Discord login failed:', error.message);
+    process.exit(1);
+});
