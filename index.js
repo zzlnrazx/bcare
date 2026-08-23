@@ -63,6 +63,15 @@ function getSpeechUrl(text) {
     });
 }
 
+async function checkDiscordHttpAccess() {
+    try {
+        const response = await fetch('https://discord.com/api/v10/gateway');
+        console.log(`Discord HTTP Gateway: ${response.status} ${response.statusText}`);
+    } catch (error) {
+        console.error('Discord HTTP Gateway check failed:', error.message);
+    }
+}
+
 async function speak(guildId, text) {
     const connection = getVoiceConnection(guildId);
     if (!connection || connection.state.status === VoiceConnectionStatus.Destroyed) return false;
@@ -181,6 +190,8 @@ const gatewayTimeout = setTimeout(() => {
     client.destroy();
     process.exit(1);
 }, 30_000);
+
+await checkDiscordHttpAccess();
 
 client.login(token).catch(error => {
     console.error('Discord login failed:', error.message);
