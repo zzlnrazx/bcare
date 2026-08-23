@@ -1,14 +1,6 @@
 import dotenv from 'dotenv';
 import express from 'express';
-import { 
-    Client, 
-    Events, 
-    GatewayIntentBits, 
-    REST, 
-    Routes, 
-    SlashCommandBuilder,
-    ApplicationCommandType 
-} from 'discord.js';
+import { Client, Events, GatewayIntentBits } from 'discord.js';
 import { 
     joinVoiceChannel, 
     getVoiceConnection, 
@@ -19,14 +11,12 @@ import {
 } from '@discordjs/voice';
 import googleTTS from 'google-tts-api';
 
-// โหลด .env เฉพาะตอนรันบนเครื่องตัวเอง (Local)
-// บน Render จะใช้ Environment Variables จากหน้า Dashboard โดยตรง
 if (process.env.NODE_ENV !== 'production') {
     dotenv.config();
 }
 
 // -------------------------------------------------------------
-// 1. ระบบ Express Web Server (สำหรับ Render เปิด Port 24/7 ฟรี)
+// Express Web Server (สำหรับ Render 24/7)
 // -------------------------------------------------------------
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -40,7 +30,7 @@ app.listen(PORT, () => {
 });
 
 // -------------------------------------------------------------
-// 2. ตั้งค่า Discord Client & Audio Players
+// Discord Client Configuration
 // -------------------------------------------------------------
 const client = new Client({ 
     intents: [
@@ -51,7 +41,6 @@ const client = new Client({
     ] 
 });
 
-// Map สำหรับเก็บ AudioPlayer แยกตาม Guild ป้องกันเสียงตีกัน
 const guildPlayers = new Map();
 
 function getOrCreatePlayer(guildId) {
@@ -61,7 +50,7 @@ function getOrCreatePlayer(guildId) {
     return guildPlayers.get(guildId);
 }
 
-// ตัวแปรสำหรับ Anti-Spam
+// Anti-Spam
 const MAX_MESSAGES = 5; 
 const PER_TIME_MS = 5000; 
 const WARNING_COOLDOWN_MS = 10000; 
@@ -69,43 +58,12 @@ const WARNING_COOLDOWN_MS = 10000;
 const SPAM_MAP = new Map();
 const COOLDOWN_MAP = new Map(); 
 
-// -------------------------------------------------------------
-// 3. โครงสร้าง Commands (/join, /leave และ ปัดขวาอ่านแชต)
-// -------------------------------------------------------------
-const commands = [
-    new SlashCommandBuilder()
-        .setName('join')
-        .setDescription('ให้บอทเข้าห้องเสียงเพื่อเตรียมอ่านแชต'),
-    new SlashCommandBuilder()
-        .setName('leave')
-        .setDescription('สั่งให้บอทออกจากห้องเสียง'),
-    {
-        name: 'อ่านข้อความนี้',
-        type: ApplicationCommandType.Message
-    }
-].map(command => typeof command.toJSON === 'function' ? command.toJSON() : command);
-
-// -------------------------------------------------------------
-// 4. Register Commands เมื่อบอทเริ่มทำงาน
-// -------------------------------------------------------------
-client.on(Events.ClientReady, async readyClient => {
+client.on(Events.ClientReady, readyClient => {
     console.log(`Logged in as ${readyClient.user.tag}!`);
-
-    const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
-    try {
-        console.log('กำลังลงทะเบียน Commands...');
-        await rest.put(
-            Routes.applicationCommands(readyClient.user.id),
-            { body: commands }
-        );
-        console.log('ลงทะเบียน Commands สำเร็จแล้ว!');
-    } catch (error) {
-        console.error('เกิดข้อผิดพลาดในการลงทะเบียน Commands:', error);
-    }
 });
 
 // -------------------------------------------------------------
-// 5. จัดการ Interaction (/join, /leave, ปัดขวา)
+// Interaction Handlers (แก้ปัญหาแอปพลิเคชันไม่ตอบสนองด้วย deferReply)
 // -------------------------------------------------------------
 client.on(Events.InteractionCreate, async interaction => {
     if (!interaction.isChatInputCommand() && !interaction.isMessageContextMenuCommand()) return;
@@ -113,11 +71,18 @@ client.on(Events.InteractionCreate, async interaction => {
     const { commandName, guild, member } = interaction;
     const player = getOrCreatePlayer(guild.id);
 
+    // --- คำสั่ง /ping ---
+    if (commandName === 'ping') {
+        return await interaction.reply({ content: 'Pong!', ephemeral: true });
+    }
+
     // --- คำสั่ง /join ---
     if (commandName === 'join') {
+        await interaction.deferReply({ ephemeral: false }); // ส่งสัญญาณบอก Discord ป้องกันการค้าง 3s
+
         const voiceChannel = member?.voice?.channel;
         if (!voiceChannel) {
-            return await interaction.reply({ content: 'คุณต้องอยู่ในช่องเสียงก่อน!', ephemeral: true });
+            return await interaction.editReply({ content: '❌ คุณต้องอยู่ในห้องเสียงก่อนสั่งให้บอทเข้า!' });
         }
 
         let connection = getVoiceConnection(guild.id);
@@ -125,7 +90,7 @@ client.on(Events.InteractionCreate, async interaction => {
         if (connection && 
             connection.joinConfig.channelId === voiceChannel.id && 
             connection.state.status !== VoiceConnectionStatus.Destroyed) {
-            return await interaction.reply({ content: 'ฉันอยู่ในห้องเสียงนี้อยู่แล้วครับ!', ephemeral: true });
+            return await interaction.editReply({ content: 'ฉันอยู่ในห้องเสียงนี้อยู่แล้วครับ!' });
         }
 
         try {
@@ -139,7 +104,6 @@ client.on(Events.InteractionCreate, async interaction => {
                 adapterCreator: guild.voiceAdapterCreator,
             });
 
-            // ตรวจจับสถานะการหลุดสาย / โดนเตะ / โดนย้าย
             connection.on(VoiceConnectionStatus.Disconnected, async () => {
                 try {
                     await Promise.race([
@@ -152,43 +116,46 @@ client.on(Events.InteractionCreate, async interaction => {
             });
 
             connection.subscribe(player);
-            await interaction.reply(`Joined **${voiceChannel.name}**`);
+            await interaction.editReply({ content: `🔊 บอทเข้าห้อง **${voiceChannel.name}** เรียบร้อยแล้ว!` });
         } catch (err) {
             console.error('Voice join failed:', err);
-            await interaction.reply({ content: 'ไม่สามารถเข้าร่วมช่องเสียงได้', ephemeral: true });
+            await interaction.editReply({ content: 'ไม่สามารถเข้าร่วมช่องเสียงได้' });
         }
     } 
     
     // --- คำสั่ง /leave ---
     else if (commandName === 'leave') {
+        await interaction.deferReply({ ephemeral: false });
+
         try {
             const connection = getVoiceConnection(guild.id);
             if (connection && connection.state.status !== VoiceConnectionStatus.Destroyed) {
                 connection.destroy();
-                await interaction.reply({ content: '👋 ออกจากช่องเสียงเรียบร้อยแล้ว!' });
+                await interaction.editReply({ content: '👋 บอทออกจากห้องเสียงเรียบร้อยแล้ว!' });
             } else {
-                await interaction.reply({ content: 'ฉันไม่ได้อยู่ในช่องเสียงตอนนี้', ephemeral: true });
+                await interaction.editReply({ content: '❌ บอทไม่ได้อยู่ในห้องเสียง' });
             }
         } catch (err) {
             console.error('Voice leave failed:', err);
-            await interaction.reply({ content: 'เกิดข้อผิดพลาดตอนพยายามออกจากช่องเสียง', ephemeral: true });
+            await interaction.editReply({ content: 'เกิดข้อผิดพลาดตอนพยายามออกจากช่องเสียง' });
         }
     }
 
-    // --- คำสั่งกดปัดขวา/คลิกขวาที่ข้อความ "อ่านข้อความนี้" ---
+    // --- คำสั่งกดปัดขวา "อ่านข้อความนี้" ---
     else if (commandName === 'อ่านข้อความนี้') {
+        await interaction.deferReply({ ephemeral: false });
+
         const connection = getVoiceConnection(guild.id);
         
         if (!connection || connection.state.status === VoiceConnectionStatus.Destroyed) {
-            return interaction.reply({ 
-                content: '❌ บอทไม่ได้อยู่ในห้องเสียง! โปรดใช้คำสั่ง `/join` ก่อนนะครับ', 
-                ephemeral: true 
+            return interaction.editReply({ 
+                content: '❌ บอทยังไม่ได้อยู่ในห้องเสียง! โปรดใช้คำสั่ง `/join` ก่อนนะ'
             });
         }
 
         const textToSpeak = interaction.targetMessage.content;
         if (!textToSpeak || textToSpeak.trim().length === 0) {
-            return interaction.reply({ content: '❌ ข้อความนี้ไม่มีตัวหนังสือให้อ่าน', ephemeral: true });
+            return interaction.editReply({ content: '❌ ข้อความนี้ไม่มีตัวหนังสือให้อ่าน (อาจเป็นรูปภาพหรือไฟล์)' });
         }
 
         try {
@@ -201,19 +168,18 @@ client.on(Events.InteractionCreate, async interaction => {
             const resource = createAudioResource(url);
             player.play(resource);
 
-            return interaction.reply({ 
-                content: `🗣️ กำลังอ่าน: "${textToSpeak.length > 50 ? textToSpeak.slice(0, 50) + '...' : textToSpeak}"`, 
-                ephemeral: false 
+            return interaction.editReply({ 
+                content: `🗣️ กำลังอ่าน: "${textToSpeak.length > 50 ? textToSpeak.slice(0, 50) + '...' : textToSpeak}"`
             });
         } catch (error) {
             console.error('TTS Context Menu Error:', error);
-            return interaction.reply({ content: '❌ เกิดข้อผิดพลาดในการแปลงเสียง', ephemeral: true });
+            return interaction.editReply({ content: '❌ เกิดข้อผิดพลาดในการแปลงเสียง' });
         }
     }
 });
 
 // -------------------------------------------------------------
-// 6. ตรวจจับการโดนเตะออกจากห้องเสียงโดยตรง (VoiceStateUpdate)
+// Voice Disconnect Event & Message Reader
 // -------------------------------------------------------------
 client.on(Events.VoiceStateUpdate, (oldState, newState) => {
     if (oldState.member.id === client.user.id) {
@@ -230,16 +196,12 @@ client.on(Events.VoiceStateUpdate, (oldState, newState) => {
     }
 });
 
-// -------------------------------------------------------------
-// 7. Event: Message Create (แชตปกติ, Anti-Spam และระบบอ่าน TTS)
-// -------------------------------------------------------------
 client.on(Events.MessageCreate, async message => {
     if (message.author.bot || !message.guild) return;
 
     const userId = message.author.id;
     const now = Date.now();
     
-    // Anti-Spam Logic
     if (COOLDOWN_MAP.has(userId)) return; 
     
     const userMessages = SPAM_MAP.get(userId) || [];
@@ -256,9 +218,8 @@ client.on(Events.MessageCreate, async message => {
     }
 
     const content = message.content;
-
-    // ระบบ TTS อ่านข้อความอัตโนมัติ
     const connection = getVoiceConnection(message.guild.id);
+
     if (
         connection && 
         connection.state.status !== VoiceConnectionStatus.Destroyed && 
@@ -285,9 +246,6 @@ client.on(Events.MessageCreate, async message => {
 process.on('unhandledRejection', reason => console.error('Unhandled Rejection:', reason));
 process.on('uncaughtException', err => console.error('Uncaught Exception:', err));
 
-// -------------------------------------------------------------
-// 8. ตรวจสอบ TOKEN และล็อกอินเข้าใช้งาน
-// -------------------------------------------------------------
 if (!process.env.TOKEN) {
     console.error('❌ ไม่พบ TOKEN ใน Environment Variables!');
 } else {
