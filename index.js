@@ -1,199 +1,157 @@
-import 'dotenv/config';
-import dns from 'node:dns';
-import express from 'express';
-import { Client, Events, GatewayIntentBits } from 'discord.js';
-import {
-    NoSubscriberBehavior,
-    VoiceConnectionStatus,
-    createAudioPlayer,
-    createAudioResource,
-    entersState,
-    getVoiceConnection,
-    joinVoiceChannel,
+import { 
+    Client, 
+    GatewayIntentBits, 
+    REST, 
+    Routes, 
+    SlashCommandBuilder 
+} from 'discord.js';
+import { 
+    joinVoiceChannel, 
+    createAudioPlayer, 
+    createAudioResource, 
+    AudioPlayerStatus 
 } from '@discordjs/voice';
-import googleTTS from 'google-tts-api';
+import * as googleTTS from 'google-tts-api';
+import express from 'express';
 
-dns.setDefaultResultOrder('ipv4first');
-
-const token = process.env.TOKEN?.trim();
-const port = Number(process.env.PORT) || 10000;
-const maxTextLength = 200;
-const maxMessages = 5;
-const spamWindowMs = 5_000;
-const warningCooldownMs = 10_000;
-
-if (!token) {
-    console.error('TOKEN is missing. Add TOKEN to the service environment.');
-    process.exit(1);
-}
-
+// ------------------------------------------------------------------
+// 1. WEB SERVER FOR RENDER PING (ป้องกันบอทหลับ/ชัตดาวน์)
+// ------------------------------------------------------------------
 const app = express();
-app.get('/', (_request, response) => response.send('Discord bot is running.'));
-app.get('/health', (_request, response) => response.json({ status: 'ok' }));
-app.listen(port, '0.0.0.0', () => console.log(`Web server listening on port ${port}`));
+const PORT = process.env.PORT || 10000;
 
+app.get('/', (req, res) => {
+    res.send('Bot is online and healthy!');
+});
+
+app.listen(PORT, () => {
+    console.log(`[HTTP] Web server listening on port ${PORT}`);
+});
+
+// ------------------------------------------------------------------
+// 2. DISCORD CLIENT INITIALIZATION
+// ------------------------------------------------------------------
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildVoiceStates,
-    ],
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent
+    ]
 });
 
-const guildPlayers = new Map();
-const messageTimestamps = new Map();
-const warningCooldowns = new Map();
+// ------------------------------------------------------------------
+// 3. DEFINE SLASH COMMANDS
+// ------------------------------------------------------------------
+const commands = [
+    new SlashCommandBuilder()
+        .setName('ping')
+        .setDescription('เช็กสถานะการตอบสนองของบอท'),
+    
+    new SlashCommandBuilder()
+        .setName('speak')
+        .setDescription('สั่งให้บอทพูดในช่องเสียง (TTS)')
+        .addStringOption(option => 
+            option.setName('text')
+                .setDescription('ข้อความที่ต้องการให้พูด')
+                .setRequired(true)
+        )
+].map(command => command.toJSON());
 
-function getPlayer(guildId) {
-    let player = guildPlayers.get(guildId);
-    if (!player) {
-        player = createAudioPlayer({ behavior: NoSubscriberBehavior.Stop });
-        player.on('error', error => console.error(`Audio error in guild ${guildId}:`, error.message));
-        guildPlayers.set(guildId, player);
-    }
-    return player;
-}
+// ------------------------------------------------------------------
+// 4. REGISTER COMMANDS & BOT READY EVENT
+// ------------------------------------------------------------------
+client.once('ready', async () => {
+    console.log(`[DISCORD] Logged in as ${client.user.tag}`);
 
-function getSpeechUrl(text) {
-    return googleTTS.getAudioUrl(text.slice(0, maxTextLength), {
-        lang: 'th',
-        slow: false,
-        host: 'https://translate.google.com',
-    });
-}
+    const TOKEN = process.env.DISCORD_TOKEN;
+    const CLIENT_ID = process.env.CLIENT_ID || client.user.id;
 
-async function checkDiscordHttpAccess() {
-    try {
-        const response = await fetch('https://discord.com/api/v10/gateway');
-        console.log(`Discord HTTP Gateway: ${response.status} ${response.statusText}`);
-    } catch (error) {
-        console.error('Discord HTTP Gateway check failed:', error.message);
-    }
-}
-
-async function speak(guildId, text) {
-    const connection = getVoiceConnection(guildId);
-    if (!connection || connection.state.status === VoiceConnectionStatus.Destroyed) return false;
-    getPlayer(guildId).play(createAudioResource(getSpeechUrl(text)));
-    return true;
-}
-
-client.once(Events.ClientReady, readyClient => {
-    clearTimeout(gatewayTimeout);
-    console.log(`Logged in as ${readyClient.user.tag}`);
-});
-
-client.on(Events.Error, error => console.error('Discord client error:', error));
-client.on(Events.ShardError, error => console.error('Discord gateway error:', error));
-
-if (process.env.DEBUG === 'true') {
-    client.on(Events.Debug, message => {
-        console.log('Discord debug:', message.replace(/Provided token: .*?(?=$|\n)/, 'Provided token: [redacted]'));
-    });
-}
-
-client.on(Events.InteractionCreate, async interaction => {
-    if (!interaction.guildId) return;
-
-    try {
-        if (interaction.isChatInputCommand()) {
-            if (interaction.commandName === 'ping') {
-                await interaction.reply({ content: 'Pong!', ephemeral: true });
-                return;
-            }
-
-            if (interaction.commandName === 'join') {
-                const voiceChannel = interaction.member?.voice?.channel;
-                if (!voiceChannel) {
-                    await interaction.reply('คุณต้องอยู่ในห้องเสียงก่อน');
-                    return;
-                }
-
-                await interaction.deferReply();
-                getVoiceConnection(interaction.guildId)?.destroy();
-                const connection = joinVoiceChannel({
-                    channelId: voiceChannel.id,
-                    guildId: interaction.guildId,
-                    adapterCreator: interaction.guild.voiceAdapterCreator,
-                });
-                connection.subscribe(getPlayer(interaction.guildId));
-                await entersState(connection, VoiceConnectionStatus.Ready, 15_000);
-                await interaction.editReply(`บอทเข้าห้อง ${voiceChannel.name} แล้ว`);
-                return;
-            }
-
-            if (interaction.commandName === 'leave') {
-                getVoiceConnection(interaction.guildId)?.destroy();
-                await interaction.reply('บอทออกจากห้องเสียงแล้ว');
-                return;
-            }
-        }
-
-        if (interaction.isMessageContextMenuCommand() && interaction.commandName === 'อ่านข้อความนี้') {
-            await interaction.deferReply();
-            const text = interaction.targetMessage?.content?.trim();
-            if (!text) {
-                await interaction.editReply('ข้อความนี้ไม่มีตัวหนังสือให้อ่าน');
-            } else if (await speak(interaction.guildId, text)) {
-                const preview = text.length > 50 ? `${text.slice(0, 50)}...` : text;
-                await interaction.editReply(`กำลังอ่าน: "${preview}"`);
-            } else {
-                await interaction.editReply('บอทยังไม่ได้อยู่ในห้องเสียง โปรดใช้ /join ก่อน');
-            }
-        }
-    } catch (error) {
-        console.error('Interaction error:', error);
-        const reply = 'เกิดข้อผิดพลาดในการทำงาน';
-        if (interaction.deferred || interaction.replied) await interaction.editReply(reply).catch(() => {});
-        else await interaction.reply({ content: reply, ephemeral: true }).catch(() => {});
-    }
-});
-
-client.on(Events.VoiceStateUpdate, (oldState, newState) => {
-    if (oldState.id === client.user?.id && oldState.channelId && !newState.channelId) {
-        getVoiceConnection(oldState.guild.id)?.destroy();
-    }
-});
-
-client.on(Events.MessageCreate, async message => {
-    if (message.author.bot || !message.guild || !message.content.trim()) return;
-
-    const now = Date.now();
-    if (warningCooldowns.has(message.author.id)) return;
-    const recent = (messageTimestamps.get(message.author.id) ?? [])
-        .filter(timestamp => now - timestamp < spamWindowMs);
-    recent.push(now);
-    messageTimestamps.set(message.author.id, recent);
-
-    if (recent.length > maxMessages) {
-        await message.reply(`โปรดส่งข้อความช้าลง ${message.author}`);
-        messageTimestamps.delete(message.author.id);
-        warningCooldowns.set(message.author.id, true);
-        setTimeout(() => warningCooldowns.delete(message.author.id), warningCooldownMs);
+    if (!TOKEN) {
+        console.error('[ERROR] Missing DISCORD_TOKEN in Environment Variables!');
         return;
     }
 
-    if (message.attachments.size === 0 && !/^https?:\/\//i.test(message.content)) {
-        await speak(message.guild.id, message.content).catch(error => {
-            console.error('Message TTS error:', error.message);
-        });
+    const rest = new REST({ version: '10' }).setToken(TOKEN);
+
+    try {
+        console.log('[REST] Started refreshing application (/) commands.');
+        
+        // ลงทะเบียนแบบ Global Commands
+        await rest.put(
+            Routes.applicationCommands(CLIENT_ID),
+            { body: commands }
+        );
+
+        console.log('[REST] Successfully reloaded application (/) commands.');
+    } catch (error) {
+        console.error('[REST ERROR] Failed to register commands:', error);
     }
 });
 
-process.on('unhandledRejection', error => console.error('Unhandled rejection:', error));
-process.on('uncaughtException', error => console.error('Uncaught exception:', error));
+// ------------------------------------------------------------------
+// 5. INTERACTION & COMMAND HANDLING
+// ------------------------------------------------------------------
+client.on('interactionCreate', async interaction => {
+    if (!interaction.isChatInputCommand()) return;
 
-const gatewayTimeout = setTimeout(() => {
-    console.error('Discord Gateway connection timed out after 30 seconds.');
-    console.error('The service can reach its HTTP port, but Discord Gateway did not respond.');
-    client.destroy();
-    process.exit(1);
-}, 30_000);
+    const { commandName } = interaction;
 
-await checkDiscordHttpAccess();
+    // --- คำสั่ง /ping ---
+    if (commandName === 'ping') {
+        await interaction.reply({ content: '🏓 Pong! บอทตอบสนองปกติบน Render ครับ', ephemeral: true });
+    }
 
-client.login(token).catch(error => {
-    console.error('Discord login failed:', error.message);
-    process.exit(1);
+    // --- คำสั่ง /speak (TTS) ---
+    if (commandName === 'speak') {
+        const text = interaction.options.getString('text');
+        const voiceChannel = interaction.member?.voice?.channel;
+
+        if (!voiceChannel) {
+            return interaction.reply({ 
+                content: '❌ คุณต้องเข้ามาในช่องเสียง (Voice Channel) ก่อนใช้งานคำสั่งนี้!', 
+                ephemeral: true 
+            });
+        }
+
+        await interaction.deferReply();
+
+        try {
+            // สร้าง URL เสียงจาก Google TTS
+            const ttsUrl = googleTTS.getAudioUrl(text, {
+                lang: 'th',
+                slow: false,
+                host: 'https://translate.google.com',
+                timeout: 10000,
+            });
+
+            // เชื่อมต่อ Voice Channel
+            const connection = joinVoiceChannel({
+                channelId: voiceChannel.id,
+                guildId: interaction.guild.id,
+                adapterCreator: interaction.guild.voiceAdapterCreator,
+            });
+
+            // เล่นเสียง
+            const player = createAudioPlayer();
+            const resource = createAudioResource(ttsUrl);
+
+            player.play(resource);
+            connection.subscribe(player);
+
+            player.on(AudioPlayerStatus.Idle, () => {
+                connection.destroy();
+            });
+
+            await interaction.editReply(`🔊 กำลังพูด: "${text}"`);
+        } catch (error) {
+            console.error('[TTS ERROR]', error);
+            await interaction.editReply('❌ เกิดข้อผิดพลาดในการเล่นเสียง TTS');
+        }
+    }
 });
+
+// ------------------------------------------------------------------
+// 6. LOGIN TO DISCORD
+// ------------------------------------------------------------------
+client.login(process.env.DISCORD_TOKEN);
